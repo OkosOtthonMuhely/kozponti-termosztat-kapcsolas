@@ -1,0 +1,145 @@
+blueprint:
+  name: Központi termosztát a szobák fűtési igénye szerint
+  description: >
+    Ha a kiválasztott szobák (radiátor szelepek / termosztátok) közül bármelyiknek
+    fűtési igénye van, bekapcsolja a központi termosztátot. Ha sehol nincs igény,
+    a megadott késleltetés után kikapcsolja.
+    A fűtési igényt a `hvac_action: heating` jelzi; ha egy eszköz nem ad
+    hvac_action-t, akkor a mért és a célhőmérséklet különbségéből számolja.
+    A központi termosztát vezérelhető célhőmérséklettel (pl. Sonoff termosztát),
+    HVAC móddal vagy kapcsolóként.
+  domain: automation
+  input:
+    zones:
+      name: Szobák (szelepek / termosztátok)
+      description: Azok a climate entitások, amelyek fűtési igényét figyeli.
+      selector:
+        entity:
+          domain: climate
+          multiple: true
+    central:
+      name: Központi termosztát / kazán
+      description: Lehet climate vagy switch entitás.
+      selector:
+        entity:
+          domain:
+            - climate
+            - switch
+    control_mode:
+      name: Vezérlés módja (csak climate esetén)
+      description: >
+        "setpoint": fűtési igénynél magas, egyébként alacsony célhőmérsékletet állít be.
+        "hvac_mode": a HVAC módot kapcsolja heat / off között.
+      default: setpoint
+      selector:
+        select:
+          options:
+            - setpoint
+            - hvac_mode
+    on_temp:
+      name: Célhőmérséklet fűtési igénynél (setpoint mód)
+      description: Olyan magas érték, hogy a központi termosztát biztosan fűtsön.
+      default: 25
+      selector:
+        number:
+          min: 5
+          max: 35
+          step: 0.5
+          unit_of_measurement: "°C"
+    off_temp:
+      name: Célhőmérséklet, ha nincs igény (setpoint mód)
+      description: Olyan alacsony érték, hogy a központi termosztát biztosan ne fűtsön.
+      default: 7
+      selector:
+        number:
+          min: 5
+          max: 35
+          step: 0.5
+          unit_of_measurement: "°C"
+    off_delay:
+      name: Kikapcsolás késleltetése
+      description: Ennyi ideig kell megszűnnie az igénynek, mielőtt kikapcsol (rövid ciklusok ellen).
+      default:
+        minutes: 3
+      selector:
+        duration:
+
+mode: restart
+
+trigger:
+  - platform: state
+    entity_id: !input zones
+  - platform: homeassistant
+    event: start
+
+variables:
+  zones: !input zones
+  central: !input central
+  control_mode: !input control_mode
+  on_temp: !input on_temp
+  off_temp: !input off_temp
+  demand: >
+    {% set ns = namespace(d=false) %}
+    {% for z in zones %}
+      {% set act = state_attr(z, 'hvac_action') %}
+      {% if act is not none %}
+        {% if act == 'heating' %}{% set ns.d = true %}{% endif %}
+      {% elif states(z) not in ['off', 'unavailable', 'unknown'] %}
+        {% set cur = state_attr(z, 'current_temperature') | float(99) %}
+        {% set tgt = state_attr(z, 'temperature') | float(0) %}
+        {% if cur < tgt %}{% set ns.d = true %}{% endif %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.d }}
+  is_switch: "{{ central.split('.')[0] == 'switch' }}"
+  use_setpoint: "{{ control_mode == 'setpoint' }}"
+
+action:
+  - choose:
+      - conditions: "{{ demand }}"
+        sequence:
+          - choose:
+              - conditions: "{{ is_switch }}"
+                sequence:
+                  - service: switch.turn_on
+                    target:
+                      entity_id: "{{ central }}"
+              - conditions: "{{ use_setpoint }}"
+                sequence:
+                  - service: climate.set_hvac_mode
+                    target:
+                      entity_id: "{{ central }}"
+                    data:
+                      hvac_mode: heat
+                  - service: climate.set_temperature
+                    target:
+                      entity_id: "{{ central }}"
+                    data:
+                      temperature: "{{ on_temp }}"
+            default:
+              - service: climate.set_hvac_mode
+                target:
+                  entity_id: "{{ central }}"
+                data:
+                  hvac_mode: heat
+    default:
+      - delay: !input off_delay
+      - choose:
+          - conditions: "{{ is_switch }}"
+            sequence:
+              - service: switch.turn_off
+                target:
+                  entity_id: "{{ central }}"
+          - conditions: "{{ use_setpoint }}"
+            sequence:
+              - service: climate.set_temperature
+                target:
+                  entity_id: "{{ central }}"
+                data:
+                  temperature: "{{ off_temp }}"
+        default:
+          - service: climate.set_hvac_mode
+            target:
+              entity_id: "{{ central }}"
+            data:
+              hvac_mode: "off"
