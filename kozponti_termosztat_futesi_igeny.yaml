@@ -24,13 +24,14 @@ blueprint:
       selector:
         entity:
           domain: climate
-    topic:
-      name: A központi termosztát MQTT témája (Zigbee2MQTT)
+    ext_input:
+      name: A központi termosztát "External temperature" number entitása
       description: >
-        Az alap téma és a friendly name, a "/set" nélkül,
-        pl. zigbee2mqtt/kozponti_termosztat
+        A Zigbee2MQTT által létrehozott number entitás (external_temperature_input),
+        pl. number.nappali_termosztat_external_temperature
       selector:
-        text:
+        entity:
+          domain: number
 
 mode: restart
 
@@ -48,7 +49,7 @@ trigger:
 variables:
   zones: !input zones
   central: !input central
-  topic: !input topic
+  ext_input: !input ext_input
   ctrl_target: "{{ state_attr(central, 'temperature') }}"
   min_diff: >
     {% set ns = namespace(d=none) %}
@@ -69,7 +70,8 @@ condition:
     value_template: "{{ ctrl_target is number }}"
 
 action:
-  - service: mqtt.publish
+  - service: number.set_value
+    target:
+      entity_id: "{{ ext_input }}"
     data:
-      topic: "{{ topic }}/set"
-      payload: "{{ {'external_temperature_input': ext_temp} | to_json }}"
+      value: "{{ ext_temp }}"
