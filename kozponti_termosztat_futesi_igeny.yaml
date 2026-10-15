@@ -1,12 +1,11 @@
 blueprint:
-  name: Központi termosztát külső hőmérséklet-bemenettel (Sonoff TP-WGZBA)
+  name: Központi termosztát a legmagasabb célú szoba alapján (Sonoff TP-WGZBA)
   description: >
-    A szobák (radiátor szelepek) közül azt a szobát figyeli, amelyik a saját
-    célhőmérsékletéhez képest a leghidegebb (legnagyobb hiány), és ebből egy
-    "virtuális" külső hőmérsékletet számol a központi termosztátnak:
-    külső hőmérséklet = a központi termosztát célhőmérséklete + a legkisebb (mért - cél) különbség.
-    Ha valamelyik szoba hideg, a érték a célhőmérséklet alá kerül, és a központi termosztát fűt.
-    Ha minden szoba elérte a célját, az érték a célhőmérséklet fölé kerül, és leáll.
+    A szobák (radiátor szelepek) közül kiválasztja azt, amelyiknek a legmagasabb
+    a célhőmérséklete (egyenlőség esetén a hidegebbet). Ennek a szobának az aktuális
+    hőmérsékletét küldi a központi termosztát külső hőmérséklet-bemenetére,
+    a központi termosztát célhőmérsékletét pedig erre a legmagasabb célra állítja.
+    Így a központi termosztát addig fűt, amíg ez a szoba el nem éri a célját.
     Előfeltétel: a központi termosztáton a hőmérséklet-forrás (temperature_sensor_select)
     legyen "remote_temperature".
   domain: automation
@@ -20,7 +19,7 @@ blueprint:
           multiple: true
     central:
       name: Központi termosztát (climate entitás)
-      description: A célhőmérsékletét (setpoint) innen olvassa.
+      description: Ennek a célhőmérsékletét (setpoint) állítja a blueprint.
       selector:
         entity:
           domain: climate
@@ -38,9 +37,6 @@ mode: restart
 trigger:
   - platform: state
     entity_id: !input zones
-  - platform: state
-    entity_id: !input central
-    attribute: temperature
   - platform: time_pattern
     minutes: "/5"
   - platform: homeassistant
@@ -50,28 +46,37 @@ variables:
   zones: !input zones
   central: !input central
   ext_input: !input ext_input
-  ctrl_target: "{{ state_attr(central, 'temperature') }}"
-  min_diff: >
-    {% set ns = namespace(d=none) %}
+  best: >
+    {% set ns = namespace(z='', t=none, c=none) %}
     {% for z in zones if states(z) not in ['off', 'unavailable', 'unknown'] %}
       {% set cur = state_attr(z, 'current_temperature') %}
       {% set tgt = state_attr(z, 'temperature') %}
       {% if cur is number and tgt is number %}
-        {% set diff = cur - tgt %}
-        {% if ns.d is none or diff < ns.d %}{% set ns.d = diff %}{% endif %}
+        {% if ns.t is none or tgt > ns.t or (tgt == ns.t and cur < ns.c) %}
+          {% set ns.z = z %}{% set ns.t = tgt %}{% set ns.c = cur %}
+        {% endif %}
       {% endif %}
     {% endfor %}
-    {{ ns.d if ns.d is not none else 3 }}
-  ext_temp: >
-    {{ ([[ctrl_target + ([min_diff, 3] | min), 0] | max, 99.9] | min) | round(1) }}
+    {{ ns.z }}
+  best_target: "{{ state_attr(best, 'temperature') if best else none }}"
+  best_current: "{{ state_attr(best, 'current_temperature') if best else none }}"
+  central_target: "{{ state_attr(central, 'temperature') }}"
 
 condition:
   - condition: template
-    value_template: "{{ ctrl_target is number }}"
+    value_template: "{{ best != '' and best_target is number and best_current is number }}"
 
 action:
   - service: number.set_value
     target:
       entity_id: "{{ ext_input }}"
     data:
-      value: "{{ ext_temp }}"
+      value: "{{ ([[best_current, 0] | max, 99.9] | min) | round(1) }}"
+  - choose:
+      - conditions: "{{ central_target is not number or (central_target | float - best_target | float) | abs > 0.05 }}"
+        sequence:
+          - service: climate.set_temperature
+            target:
+              entity_id: "{{ central }}"
+            data:
+              temperature: "{{ [[best_target, 5] | max, 30] | min }}"
